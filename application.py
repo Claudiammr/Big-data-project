@@ -153,15 +153,15 @@ def main(file_paths):
     final_df = final_df.withColumn("ArrDelayClass", when(final_df["ArrDelay"] <= 0, 0).otherwise(1))
 
     # As is imbalanced we do an oversampling
-df_a = final_df.filter(final_df['ArrDelayClass'] == 1)
-df_b = final_df.filter(final_df['ArrDelayClass'] == 0)
+    df_a = final_df.filter(final_df['ArrDelayClass'] == 1)
+    df_b = final_df.filter(final_df['ArrDelayClass'] == 0)
 
-a_count = df_a.count()
-b_count = df_b.count() 
-ratio = a_count / b_count
+    a_count = df_a.count()
+    b_count = df_b.count() 
+    ratio = a_count / b_count
 
-df_b_oversampled = df_b.sample(withReplacement=True, fraction=ratio, seed=1)
-combined_df = df_a.unionAll(df_b_oversampled)
+    df_b_oversampled = df_b.sample(withReplacement=True, fraction=ratio, seed=1)
+    combined_df = df_a.unionAll(df_b_oversampled)
 
     # Preparation of the data for the model
     columns = [
@@ -257,7 +257,6 @@ combined_df = df_a.unionAll(df_b_oversampled)
     accuracy = evaluator.evaluate(predictions)
     print("Test set accuracy = {:.2f}".format(accuracy))
         
-    
     # Stop the Spark session
     spark.stop()
 
