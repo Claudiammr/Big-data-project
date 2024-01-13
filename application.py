@@ -6,6 +6,7 @@ from pyspark.ml.classification import RandomForestClassifier, LogisticRegression
 from pyspark.ml.regression import DecisionTreeRegressor, GBTRegressor
 from pyspark.ml import Pipeline
 from pyspark.ml.tuning import ParamGridBuilder, CrossValidator
+from pyspark.ml.evaluation import RegressionEvaluator
 
 import argparse
 
@@ -24,7 +25,7 @@ def main(file_paths):
         .config("spark.executor.memory", "4g") \
         .getOrCreate()
 
-    spark.sparkContext.setLogLevel("WARN")
+    # spark.sparkContext.setLogLevel("WARN")
 
     # Read and concatenate the CSV files
     df = None
@@ -37,7 +38,8 @@ def main(file_paths):
     # Sampling
     df = df.sample(fraction=0.0005, seed=42)
 
-    print(df.count())
+
+    print(f"Running on {df.count()} instances...")
 
     # columns to eliminate
     columns = [
@@ -58,7 +60,6 @@ def main(file_paths):
 
     # Drop canceled flights (where "Cancelled" column is not equal to 1)
     df = df.filter(df["Cancelled"] != 1)
-    print(df.count())
 
     columns = [
         "TailNum",
@@ -72,7 +73,7 @@ def main(file_paths):
     # We drop some columns that are higly correlated with another
 
     # df = df.drop("CRSElapsedTime", "CRSElapsedTime", "CRSArrTime", "CRSDepTime")
-
+    
     df.printSchema()
 
     # Iterate over all columns in the DataFrame and replace "NA" with None
@@ -86,10 +87,11 @@ def main(file_paths):
 
     # Transform some variables
 
-    # Convert 'Distance', 'DepDelay', and 'ArrDelay' from string to integer
+    # Convert 'Distance', 'DepDelay','CRSElapsedTime', and 'ArrDelay' from string to integer
     df = df.withColumn("Distance", col("Distance").cast("integer"))
     df = df.withColumn("DepDelay", col("DepDelay").cast("integer"))
     df = df.withColumn("ArrDelay", col("ArrDelay").cast("integer"))
+    df = df.withColumn("CRSElapsedTime", col("CRSElapsedTime").cast("integer"))
 
     # Convert 'CRSDepTime' and 'CRSArrTime' from integer to string
     df = df.withColumn("CRSDepTime", col("CRSDepTime").cast("string"))
@@ -100,7 +102,6 @@ def main(file_paths):
     df = df.withColumn("CRSArrTime", convert_to_minutes("CRSArrTime"))
     df = df.withColumn("DepTime", convert_to_minutes("DepTime"))
 
-    df.printSchema()
 
     # Read the CSV file
     usa_airport_df = spark.read.csv("us-airports.csv", header=True)
@@ -128,16 +129,16 @@ def main(file_paths):
     df = final_df.dropna().dropDuplicates()
 
     # Convert "Origini_Lat" from string to double
-    df = df.withColumn("Origin_Lat", df["Origin_Lat"].cast("double"))
+    df = df.withColumn("Origin_Lat", df["Origin_Lat"].cast("int"))
 
     # Convert "Origini_Long" from string to double
-    df = df.withColumn("Origin_Long", df["Origin_Long"].cast("double"))
+    df = df.withColumn("Origin_Long", df["Origin_Long"].cast("int"))
 
     # Convert "Dest_Lat" from string to double
-    df = df.withColumn("Dest_Lat", df["Dest_Lat"].cast("double"))
+    df = df.withColumn("Dest_Lat", df["Dest_Lat"].cast("int"))
 
     # Convert "Dest_Long" from string to double
-    df = df.withColumn("Dest_Long", df["Dest_Long"].cast("double"))
+    df = df.withColumn("Dest_Long", df["Dest_Long"].cast("int"))
 
     # Create a StringIndexer
     indexer = StringIndexer(inputCol="UniqueCarrier", outputCol="UniqueCarrierIndex")
@@ -148,6 +149,7 @@ def main(file_paths):
     assembler = VectorAssembler(
         inputCols=["Year", "Month", "DayofMonth", "DayOfWeek", "DepTime", "CRSDepTime", "CRSArrTime",
                    "FlightNum", "CRSElapsedTime", "ArrDelay", "DepDelay", "Distance",
+                   "FlightNum", "CRSElapsedTime", "DepDelay", "Distance",
                    "Origin_Lat", "Origin_Long", "Dest_Lat", "Dest_Long", "UniqueCarrierVec"],
         outputCol="features")
 
@@ -272,38 +274,140 @@ def main(file_paths):
     print("GBT Regressor R-squared:", gbt_r2)
 
     # Cross validation
-    # Define the hyperparameter grid
-    paramGrid = ParamGridBuilder() \
-        .addGrid(rf.numTrees, [10, 20, 30]) \
-        .addGrid(rf.maxDepth, [5, 10, 15]) \
-        .build()
+    print("Final DF Shape: ")
+    df.printSchema()
 
-    # Create the cross-validator
-    cross_validator = CrossValidator(estimator=pipeline,
-                              estimatorParamMaps=paramGrid,
-                    evaluator=MulticlassClassificationEvaluator(labelCol="ArrDelayClass", metricName="accuracy"),
-                              numFolds=5, seed=123)
-    column=["features"]
-    train_data=train_data.drop(*column)
-    cv_model = cross_validator.fit(train_data)
+    # For classification we create a new Variable ArrDelayClass based on ArrDelay
+    # Categorize flights as "Not Late" (0) if ArrDelay <= 15, and "Late" (1) otherwise
+    df = df.withColumn("ArrDelayClass", when(df["ArrDelay"] <= 15, 0).otherwise(1))
 
-    best_rf_model = cv_model.bestModel.stages[-1]
-    importances = best_rf_model.featureImportances
+    #### MODELING
+
+    # Split the data
+    (train_data, test_data) = df.randomSplit([0.8, 0.2])
+
+    dt = DecisionTreeRegressor(featuresCol="features", labelCol="ArrDelay")
+
+    # Models
+    lr = LogisticRegression(featuresCol="scaledFeatures", labelCol="ArrDelayClass", regParam=0.01)
+    rf = RandomForestClassifier(featuresCol="features", labelCol="ArrDelayClass")
     
+    gbt = GBTRegressor(featuresCol="features", labelCol="ArrDelay", maxIter=10)
+
+    print("Training...")
+    # Train Models
+    lr_model = lr.fit(train_data)
+    rf_model = rf.fit(train_data)
+    dt_model = dt.fit(train_data)
+    gbt_model = gbt.fit(train_data)
+
+    print("Done.")
+
+    print("Evaluating...")
+    # Predictions
+    lr_predictions = lr_model.transform(test_data)
+    rf_predictions = rf_model.transform(test_data)
+    dt_predictions = dt_model.transform(test_data)
+    gbt_predictions = gbt_model.transform(test_data)
+
+    print("Done.")
+
+
+    # Evaluation for classification models
+    binary_evaluator = BinaryClassificationEvaluator(labelCol="ArrDelayClass")
+
+    # Multiclass Classification Evaluator
+    multi_evaluator = MulticlassClassificationEvaluator(labelCol="ArrDelayClass")
+
+
+    # Evaluate Logistic Regression
+    lr_auc = binary_evaluator.evaluate(lr_predictions)
+    lr_precision = multi_evaluator.evaluate(lr_predictions, {multi_evaluator.metricName: "precisionByLabel"})
+    lr_recall = multi_evaluator.evaluate(lr_predictions, {multi_evaluator.metricName: "recallByLabel"})
+    lr_f1 = multi_evaluator.evaluate(lr_predictions, {multi_evaluator.metricName: "f1"})
+    lr_area_under_pr = binary_evaluator.setMetricName("areaUnderPR").evaluate(lr_predictions)
+
+    print("Logistic Regression AUC:", lr_auc)
+    print("Logistic Regression Precision:", lr_precision)
+    print("Logistic Regression Recall:", lr_recall)
+    print("Logistic Regression F1 Score:", lr_f1)
+    print("Logistic Regression Area Under PR:", lr_area_under_pr)
+
     
-    print("Feature Importances:")
-    for feature, importance in zip(feature_columns, importances):
-        print(f"{feature}: {importance:.4f}")
+    # Evaluate Random Forest Classifier
+    rf_auc = binary_evaluator.evaluate(rf_predictions)
+    rf_precision = multi_evaluator.evaluate(rf_predictions, {multi_evaluator.metricName: "precisionByLabel"})
+    rf_recall = multi_evaluator.evaluate(rf_predictions, {multi_evaluator.metricName: "recallByLabel"})
+    rf_f1 = multi_evaluator.evaluate(rf_predictions, {multi_evaluator.metricName: "f1"})
+    rf_area_under_pr = binary_evaluator.setMetricName("areaUnderPR").evaluate(rf_predictions)
+
+    print("Random Forest Classifier AUC:", rf_auc)
+    print("Random Forest Classifier Precision:", rf_precision)
+    print("Random Forest Classifier Recall:", rf_recall)
+    print("Random Forest Classifier F1 Score:", rf_f1)
+    print("Random Forest Classifier Area Under PR:", rf_area_under_pr)
+
     
-        # Make predictions on the test data
-    predictions = cv_model.transform(test_data)
-    
-    evaluator = MulticlassClassificationEvaluator(labelCol="ArrDelayClass", metricName="accuracy")
-    
-    # Evaluate the model
-    accuracy = evaluator.evaluate(predictions)
-    print("Test set accuracy = {:.2f}".format(accuracy))
-    
+
+
+    # Regression Evaluator
+    regression_evaluator = RegressionEvaluator(labelCol="ArrDelay")
+
+    # Evaluate Decision Tree Regressor
+    dt_rmse = regression_evaluator.evaluate(dt_predictions)
+    dt_mae = regression_evaluator.setMetricName("mae").evaluate(dt_predictions)
+    dt_r2 = regression_evaluator.setMetricName("r2").evaluate(dt_predictions)
+
+    print("Decision Tree Regressor RMSE:", dt_rmse)
+    print("Decision Tree Regressor MAE:", dt_mae)
+    print("Decision Tree Regressor R-squared:", dt_r2)
+
+
+
+    # Evaluate GBT Regressor
+    gbt_rmse = regression_evaluator.evaluate(gbt_predictions)
+    gbt_mae = regression_evaluator.setMetricName("mae").evaluate(gbt_predictions)
+    gbt_r2 = regression_evaluator.setMetricName("r2").evaluate(gbt_predictions)
+
+    print("GBT Regressor RMSE:", gbt_rmse)
+    print("GBT Regressor MAE:", gbt_mae)
+    print("GBT Regressor R-squared:", gbt_r2)
+
+
+        # Cross validation
+        # Define the hyperparameter grid
+        paramGrid = ParamGridBuilder() \
+            .addGrid(rf.numTrees, [10, 20, 30]) \
+            .addGrid(rf.maxDepth, [5, 10, 15]) \
+            .build()
+
+        # Create the cross-validator
+        cross_validator = CrossValidator(estimator=pipeline,
+                                  estimatorParamMaps=paramGrid,
+                        
+                                  numFolds=5, seed=123)
+        column=["features"]
+        train_data=train_data.drop(*column)
+        cv_model = cross_validator.fit(train_data)
+
+        best_rf_model = cv_model.bestModel.stages[-1]
+        importances = best_rf_model.featureImportances
+
+
+        print("Feature Importances:")
+        for feature, importance in zip(feature_columns, importances):
+            print(f"{feature}: {importance:.4f}")
+
+            # Make predictions on the test data
+        predictions = cv_model.transform(test_data)
+
+        evaluator = MulticlassClassificationEvaluator(labelCol="ArrDelayClass", metricName="accuracy")
+
+        # Evaluate the model
+        accuracy = evaluator.evaluate(predictions)
+        print("Test set accuracy = {:.2f}".format(accuracy))
+
+
 
     # Stop the Spark session
     spark.stop()
