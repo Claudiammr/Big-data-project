@@ -373,7 +373,7 @@ def main(file_paths):
     print("GBT Regressor MAE:", gbt_mae)
     print("GBT Regressor R-squared:", gbt_r2)
 
-
+    '''
         # Cross validation
         # Define the hyperparameter grid
         paramGrid = ParamGridBuilder() \
@@ -407,7 +407,7 @@ def main(file_paths):
         accuracy = evaluator.evaluate(predictions)
         print("Test set accuracy = {:.2f}".format(accuracy))
 
-
+    '''
 
     # Stop the Spark session
     spark.stop()
